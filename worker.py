@@ -4,8 +4,7 @@ worker.py — воркер:
   2. git pull (обновляет репо)
   3. Запускает Claude Code CLI с промптом
   4. git add + commit + push heroku
-  5. Ждёт завершения деплоя на Heroku
-  6. Отправляет результат в Telegram
+  5. Отправляет результат в Telegram
 """
 
 import os
@@ -33,15 +32,11 @@ TASK_QUEUE      = os.getenv("TASK_QUEUE", "claude:tasks")
 RESULT_KEY      = os.getenv("RESULT_KEY", "claude:last_result")
 FAILED_QUEUE    = os.getenv("FAILED_QUEUE", "claude:failed")
 
-REPO_DIR        = Path(os.environ["REPO_DIR"])          # /opt/myproject
-HEROKU_APP      = os.environ["HEROKU_APP_NAME"]         # my-app-name
-HEROKU_API_KEY  = os.environ["HEROKU_API_KEY"]
-GIT_REMOTE      = os.getenv("HEROKU_GIT_REMOTE", "heroku")  # имя git remote
+REPO_DIR        = Path(os.environ["REPO_DIR"])
+GIT_REMOTE      = os.getenv("HEROKU_GIT_REMOTE", "heroku")
 
 CLAUDE_TIMEOUT  = int(os.getenv("CLAUDE_TIMEOUT", "300"))
-DEPLOY_TIMEOUT  = int(os.getenv("DEPLOY_TIMEOUT", "180"))
 API_BASE        = f"https://api.telegram.org/bot{BOT_TOKEN}"
-HEROKU_API      = "https://api.heroku.com"
 
 MAX_MSG         = 3800   # символов в сообщении Telegram
 
@@ -165,42 +160,6 @@ async def heroku_deploy() -> tuple[bool, str]:
     return True, "Push успешен, Heroku собирает..."
 
 
-async def wait_for_heroku_build(client: httpx.AsyncClient) -> str:
-    """
-    Опрашивает Heroku API пока деплой не завершится.
-    Возвращает финальный статус.
-    """
-    headers = {
-        "Authorization": f"Bearer {HEROKU_API_KEY}",
-        "Accept": "application/vnd.heroku+json; version=3",
-    }
-    deadline = asyncio.get_event_loop().time() + DEPLOY_TIMEOUT
-
-    while asyncio.get_event_loop().time() < deadline:
-        await asyncio.sleep(5)
-        try:
-            r = await client.get(
-                f"{HEROKU_API}/apps/{HEROKU_APP}/builds",
-                headers=headers,
-            )
-            builds = r.json()
-            if not builds:
-                continue
-            latest = builds[-1]
-            status = latest.get("status", "unknown")
-
-            if status == "succeeded":
-                slug = latest.get("slug", {}) or {}
-                return f"✅ Деплой успешен (slug: {slug.get('id', '?')[:8]})"
-            elif status == "failed":
-                output_url = latest.get("output_stream_url", "")
-                return f"❌ Деплой упал. Логи: {output_url}"
-            # pending / building — ждём
-        except Exception as e:
-            log.warning("Heroku API error: %s", e)
-
-    return "⚠️ Таймаут ожидания деплоя — проверь Heroku вручную"
-
 
 # ── основной цикл ─────────────────────────────────────────────────────────────
 async def process_task(redis_client: aioredis.Redis, task_raw: str):
@@ -239,10 +198,7 @@ async def process_task(redis_client: aioredis.Redis, task_raw: str):
                 await tg_edit(client, chat_id, ack_id,
                               "🚀 *Шаг 3/3* — Деплой на Heroku...")
             push_ok, push_msg = await heroku_deploy()
-            if push_ok and "не нужен" not in push_msg:
-                deploy_status = await wait_for_heroku_build(client)
-            else:
-                deploy_status = push_msg
+            deploy_status = push_msg
         else:
             deploy_status = "⏭ Пропущен (Claude Code завершился с ошибкой)"
 
@@ -287,7 +243,7 @@ async def process_task(redis_client: aioredis.Redis, task_raw: str):
 
 
 async def main():
-    log.info("Worker started. Repo: %s  Heroku app: %s", REPO_DIR, HEROKU_APP)
+    log.info("Worker started. Repo: %s", REPO_DIR)
     redis_client = await aioredis.from_url(REDIS_URL, decode_responses=True)
     try:
         while True:
