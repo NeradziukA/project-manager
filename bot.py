@@ -8,6 +8,7 @@ Task lifecycle:
   waiting  → Claude asked a question, waiting for /answer_N
 """
 
+import asyncio
 import os
 import re
 import json
@@ -34,10 +35,39 @@ TASK_COUNTER   = os.getenv("TASK_COUNTER",    "claude:task_counter")
 PENDING_PREFIX = os.getenv("PENDING_PREFIX",  "claude:pending:")
 WAITING_PREFIX = os.getenv("WAITING_PREFIX",  "claude:waiting:")
 PROGRESS_KEY   = os.getenv("PROGRESS_KEY",    "claude:in_progress")
+HEARTBEAT_KEY  = os.getenv("HEARTBEAT_KEY",   "claude:worker:heartbeat")
+ALERT_CHAT_ID  = int(os.getenv("ALERT_CHAT_ID", "0")) or next(iter(ALLOWED_IDS), None)
+CHECK_INTERVAL = int(os.getenv("WORKER_CHECK_INTERVAL", "300"))  # seconds
 API_BASE       = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 app   = FastAPI(title="TG Claude Bot")
 redis: aioredis.Redis | None = None
+
+
+async def worker_watchdog() -> None:
+    """Checks worker heartbeat every CHECK_INTERVAL seconds.
+    Only alerts if there are tasks waiting — idle worker is fine.
+    """
+    await asyncio.sleep(60)  # initial delay after startup
+    while True:
+        await asyncio.sleep(CHECK_INTERVAL)
+        try:
+            has_work = (
+                await redis.llen(TASK_QUEUE) > 0
+                or await redis.exists(PROGRESS_KEY)
+            )
+            if not has_work:
+                continue  # queue empty — no need to check
+
+            hb = await redis.exists(HEARTBEAT_KEY)
+            if not hb and ALERT_CHAT_ID:
+                await send(ALERT_CHAT_ID,
+                           "⚠️ *Воркер не отвечает!*\n"
+                           "Heartbeat устарел, но в очереди есть задачи.\n"
+                           "`systemctl restart hives-worker`")
+                log.error("Worker heartbeat missing with tasks in queue")
+        except Exception as e:
+            log.warning("Watchdog check failed: %s", e)
 
 
 @app.on_event("startup")
@@ -45,6 +75,7 @@ async def startup():
     global redis
     redis = await aioredis.from_url(REDIS_URL, decode_responses=True)
     log.info("Redis connected")
+    asyncio.create_task(worker_watchdog())
 
 
 @app.on_event("shutdown")

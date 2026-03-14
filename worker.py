@@ -40,6 +40,9 @@ REPO_DIR        = Path(os.environ["REPO_DIR"])
 GIT_REMOTE      = os.getenv("HEROKU_GIT_REMOTE", "heroku")
 
 CLAUDE_TIMEOUT  = int(os.getenv("CLAUDE_TIMEOUT", "300"))
+HEARTBEAT_KEY   = os.getenv("HEARTBEAT_KEY",   "claude:worker:heartbeat")
+HEARTBEAT_TTL   = 30    # seconds until key expires — if missing, worker is down
+HEARTBEAT_INTERVAL = 10  # how often to refresh
 API_BASE        = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 MAX_MSG         = 3800   # chars per Telegram message
@@ -304,9 +307,22 @@ async def process_task(redis_client: aioredis.Redis, task_raw: str) -> str:
     return "ok" if claude_ok else "fail"
 
 
+async def heartbeat_writer(redis_client: aioredis.Redis) -> None:
+    """Writes a heartbeat key to Redis every HEARTBEAT_INTERVAL seconds.
+    If the key disappears (TTL expired), the manager bot knows the worker is down.
+    """
+    while True:
+        try:
+            await redis_client.set(HEARTBEAT_KEY, datetime.utcnow().isoformat(), ex=HEARTBEAT_TTL)
+        except Exception as e:
+            log.warning("Heartbeat write failed: %s", e)
+        await asyncio.sleep(HEARTBEAT_INTERVAL)
+
+
 async def main():
     log.info("Worker started. Repo: %s", REPO_DIR)
     redis_client = await aioredis.from_url(REDIS_URL, decode_responses=True)
+    asyncio.create_task(heartbeat_writer(redis_client))
     try:
         while True:
             item = await redis_client.blpop(TASK_QUEUE, timeout=2)
