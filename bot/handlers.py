@@ -156,19 +156,30 @@ async def handle_message(redis, message: dict) -> JSONResponse:
 
     # /update_bot ──────────────────────────────────────────────────────────────
     if text == "/update_bot":
-        result = subprocess.run(
+        pull = subprocess.run(
             ["git", "pull", "--rebase"],
             cwd=str(PROJECT_DIR),
             capture_output=True, text=True,
         )
-        if result.returncode != 0:
-            await send(chat_id, f"❌ git pull failed:\n```\n{result.stderr[:800]}\n```")
+        if pull.returncode != 0:
+            await send(chat_id, f"❌ git pull failed:\n```\n{pull.stderr[:800]}\n```")
             return JSONResponse({"ok": True})
 
-        out = result.stdout.strip() or "Already up to date."
-        await send(chat_id, f"✅ Обновлено:\n```\n{out[:600]}\n```\nПерезапускаю бот...")
-        log.info("update_bot: git pull ok, restarting")
-        subprocess.Popen(["sudo", "systemctl", "restart", "hives-bot"])
+        pull_out = pull.stdout.strip() or "Already up to date."
+
+        # restart worker first — we can get its result
+        w = subprocess.run(["sudo", "systemctl", "restart", "hives-worker"],
+                           capture_output=True, text=True)
+        worker_status = "✅ воркер перезапущен" if w.returncode == 0 else f"❌ воркер: {w.stderr.strip()}"
+
+        await send(chat_id,
+                   f"✅ *git pull:*\n```\n{pull_out[:400]}\n```\n"
+                   f"{worker_status}\n"
+                   f"🔄 Перезапускаю бот... жди `🟢 Бот запущен`")
+
+        log.info("update_bot: restarting hives-bot")
+        # small delay so the message is delivered before process dies
+        subprocess.Popen(["bash", "-c", "sleep 1 && sudo systemctl restart hives-bot"])
         return JSONResponse({"ok": True})
 
     # /ok_N (text fallback) ────────────────────────────────────────────────────

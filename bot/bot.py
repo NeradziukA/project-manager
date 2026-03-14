@@ -9,9 +9,10 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 import redis.asyncio as aioredis
 
-from shared.config import REDIS_URL, TASK_QUEUE
+from shared.config import REDIS_URL, TASK_QUEUE, NOTIFY_CHAT_ID, ALLOWED_IDS
 from bot.handlers import handle_callback, handle_message
 from bot.watchdog import worker_watchdog, task_notifier
+from bot.telegram import send
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("bot")
@@ -27,6 +28,9 @@ async def startup():
     log.info("Redis connected")
     asyncio.create_task(worker_watchdog(redis))
     asyncio.create_task(task_notifier(redis))
+    notify_chat = NOTIFY_CHAT_ID or next(iter(ALLOWED_IDS), None)
+    if notify_chat:
+        await send(notify_chat, "🟢 *Бот запущен*")
 
 
 @app.on_event("shutdown")
