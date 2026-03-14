@@ -84,8 +84,8 @@ async def handle_message(redis, message: dict) -> JSONResponse:
         await send(chat_id, "Отправь текстовую задачу для Claude Code.")
         return JSONResponse({"ok": True})
 
-    # /start ───────────────────────────────────────────────────────────────────
-    if text == "/start":
+    # /start, /help ───────────────────────────────────────────────────────────
+    if text in ("/start", "/help"):
         await send(chat_id, (
             "👋 *Claude Code + Heroku Bot*\n\n"
             "Напиши задачу — появятся кнопки подтверждения, затем Claude Code изменит код и задеплоит.\n\n"
@@ -168,7 +168,7 @@ async def handle_message(redis, message: dict) -> JSONResponse:
         out = result.stdout.strip() or "Already up to date."
         await send(chat_id, f"✅ Обновлено:\n```\n{out[:600]}\n```\nПерезапускаю бот...")
         log.info("update_bot: git pull ok, restarting")
-        subprocess.Popen(["systemctl", "restart", "tg-bot"])
+        subprocess.Popen(["sudo", "systemctl", "restart", "hives-bot"])
         return JSONResponse({"ok": True})
 
     # /ok_N (text fallback) ────────────────────────────────────────────────────
