@@ -319,9 +319,26 @@ async def heartbeat_writer(redis_client: aioredis.Redis) -> None:
         await asyncio.sleep(HEARTBEAT_INTERVAL)
 
 
+async def recover_stale_task(redis_client: aioredis.Redis) -> None:
+    """On startup, requeue any task that was interrupted mid-processing."""
+    raw = await redis_client.get(PROGRESS_KEY)
+    if not raw:
+        return
+    try:
+        task = json.loads(raw)
+        task["retry"] = task.get("retry", 0) + 1
+        await redis_client.rpush(TASK_QUEUE, json.dumps(task, ensure_ascii=False))
+        await redis_client.delete(PROGRESS_KEY)
+        log.info("Recovered stale task #%s → requeued as retry #%d",
+                 task.get("task_num"), task["retry"])
+    except Exception as e:
+        log.warning("Failed to recover stale task: %s", e)
+
+
 async def main():
     log.info("Worker started. Repo: %s", REPO_DIR)
     redis_client = await aioredis.from_url(REDIS_URL, decode_responses=True)
+    await recover_stale_task(redis_client)
     asyncio.create_task(heartbeat_writer(redis_client))
     try:
         while True:

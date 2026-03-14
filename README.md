@@ -2,24 +2,41 @@
 
 ## Как работает
 
-```
-Ты (Telegram)
-    │ пишешь задачу
-    ▼
-Bot (FastAPI + webhook)
-    │ кладёт в очередь Redis
-    ▼
-Worker (Python)
-    ├─ git pull (обновляет репо)
-    ├─ claude --print "задача"  ← Claude Code меняет файлы
-    ├─ git commit + push heroku
-    └─ ждёт статус деплоя через Heroku API
-    │
-    ▼
-Ты (Telegram)
-    ← ✅ что сделал Claude Code
-    ← 🚀 статус деплоя на Heroku
-    ← 📂 какие файлы изменились
+```mermaid
+sequenceDiagram
+    participant U as Ты (Telegram)
+    participant B as Bot (FastAPI)
+    participant R as Redis
+    participant W as Worker
+    participant C as Claude Code
+    participant H as Heroku
+
+    U->>B: пишешь задачу
+    B->>R: claude:pending:{N} + номер задачи
+    B->>U: Задача #N принята. /ok_N для подтверждения
+
+    U->>B: /ok_N
+    B->>R: rpush claude:tasks:{queue}
+
+    W->>R: blpop claude:tasks (ждёт задачу)
+    W->>R: set claude:in_progress (отмечает текущую задачу)
+    W->>U: ⚙️ Задача #N принята в работу
+    W->>W: git pull
+    W->>C: claude --print --dangerously-skip-permissions
+    alt Claude задаёт вопрос
+        C-->>W: QUESTION: ...
+        W->>R: set claude:waiting:{N}
+        W->>U: ❓ Задача #N — вопрос: ... /answer_N
+        U->>B: /answer_N ответ
+        B->>R: rpush claude:tasks (с ответом в промпте)
+    else Задача выполнена
+        C-->>W: результат
+        W->>H: git push heroku main
+        W->>R: del claude:in_progress
+        W->>U: ✅ Задача выполнена
+    end
+
+    note over W: При рестарте: stale in_progress → requeue автоматически
 ```
 
 ---
@@ -116,8 +133,11 @@ python setup_webhook.py
 
 ## Команды бота
 
-- Любой текст — поставить задачу в очередь
-- `/queue` — сколько задач в очереди
+- Любой текст — создаёт задачу в ожидании подтверждения (#N)
+- `/ok_N` — подтвердить задачу #N (отправить в работу)
+- `/cancel_N` — отменить задачу #N
+- `/answer_N текст` — ответить на вопрос Claude по задаче #N
+- `/queue` — очередь: ожидающие, задача в работе, статистика
 - `/status` — результат последней задачи
 
 ---
