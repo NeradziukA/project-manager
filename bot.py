@@ -36,7 +36,9 @@ PENDING_PREFIX = os.getenv("PENDING_PREFIX",  "claude:pending:")
 WAITING_PREFIX = os.getenv("WAITING_PREFIX",  "claude:waiting:")
 PROGRESS_KEY   = os.getenv("PROGRESS_KEY",    "claude:in_progress")
 HEARTBEAT_KEY  = os.getenv("HEARTBEAT_KEY",   "claude:worker:heartbeat")
+NOTIFY_QUEUE   = os.getenv("NOTIFY_QUEUE",    "claude:notify")
 ALERT_CHAT_ID  = int(os.getenv("ALERT_CHAT_ID", "0")) or next(iter(ALLOWED_IDS), None)
+NOTIFY_CHAT_ID = int(os.getenv("NOTIFY_CHAT_ID", "0")) or next(iter(ALLOWED_IDS), None)
 CHECK_INTERVAL = int(os.getenv("WORKER_CHECK_INTERVAL", "300"))  # seconds
 API_BASE       = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
@@ -70,12 +72,50 @@ async def worker_watchdog() -> None:
             log.warning("Watchdog check failed: %s", e)
 
 
+async def task_notifier() -> None:
+    """Watches claude:notify for tasks routed by the orchestrator.
+    Sends confirmation request to NOTIFY_CHAT_ID and updates ack_msg_id in pending.
+    """
+    await asyncio.sleep(2)
+    while True:
+        try:
+            item = await redis.blpop(NOTIFY_QUEUE, timeout=5)
+            if not item:
+                continue
+            _, task_num_str = item
+            raw = await redis.get(f"{PENDING_PREFIX}{task_num_str}")
+            if not raw:
+                log.warning("Notify: pending task #%s not found", task_num_str)
+                continue
+            task = json.loads(raw)
+            notify_chat = NOTIFY_CHAT_ID or task.get("chat_id")
+            if not notify_chat:
+                log.warning("Notify: no chat_id for task #%s", task_num_str)
+                continue
+            prompt = task["prompt"]
+            ack = await send(
+                notify_chat,
+                f"📋 *Задача #{task_num_str}*\n\n`{prompt}`\n\n"
+                f"Запустить? `/ok_{task_num_str}`\n"
+                f"Отменить: `/cancel_{task_num_str}`",
+            )
+            # Store ack_msg_id and redirect results to this chat
+            ack_msg_id = ack.get("result", {}).get("message_id")
+            task["ack_msg_id"] = ack_msg_id
+            task["chat_id"] = notify_chat
+            await redis.set(f"{PENDING_PREFIX}{task_num_str}", json.dumps(task, ensure_ascii=False))
+            log.info("Notified chat %s about pending task #%s", notify_chat, task_num_str)
+        except Exception as e:
+            log.warning("Task notifier error: %s", e)
+
+
 @app.on_event("startup")
 async def startup():
     global redis
     redis = await aioredis.from_url(REDIS_URL, decode_responses=True)
     log.info("Redis connected")
     asyncio.create_task(worker_watchdog())
+    asyncio.create_task(task_notifier())
 
 
 @app.on_event("shutdown")
