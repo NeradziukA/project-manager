@@ -1,193 +1,43 @@
 """
-worker.py:
+worker/worker.py:
   1. Takes a task from Redis
   2. git pull (updates repo)
   3. Runs Claude Code CLI with prompt
   4. git add + commit + push heroku
   5. Sends result to Telegram
 
-Task result statuses: "ok" | "fail" | "question"
+Task result statuses: "ok" | "fail" | "question" | "rate_limit"
 """
 
-import os
 import json
 import logging
 import asyncio
-import subprocess
-import shutil
 from datetime import datetime
-from pathlib import Path
 
 import httpx
 import redis.asyncio as aioredis
-from dotenv import load_dotenv
 
-load_dotenv()
+from shared.config import (
+    REDIS_URL, TASK_QUEUE, RESULT_KEY, FAILED_QUEUE,
+    WAITING_PREFIX, PROGRESS_KEY,
+    HEARTBEAT_KEY, HEARTBEAT_TTL, HEARTBEAT_INTERVAL,
+    QUESTION_MARKER,
+)
+from worker.telegram import tg_send, tg_edit, chunks
+from worker.git_utils import git, get_diff, heroku_deploy
+from worker.claude_runner import run_claude, is_rate_limited
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("worker")
 
-# ── config ─────────────────────────────────────────────────────────────────────
-BOT_TOKEN       = os.environ["TELEGRAM_BOT_TOKEN"]
-REDIS_URL       = os.getenv("REDIS_URL",       "redis://localhost:6379")
-TASK_QUEUE      = os.getenv("TASK_QUEUE",      "claude:tasks")
-RESULT_KEY      = os.getenv("RESULT_KEY",      "claude:last_result")
-FAILED_QUEUE    = os.getenv("FAILED_QUEUE",    "claude:failed")
-WAITING_PREFIX  = os.getenv("WAITING_PREFIX",  "claude:waiting:")
-PROGRESS_KEY    = os.getenv("PROGRESS_KEY",    "claude:in_progress")
 
-REPO_DIR        = Path(os.environ["REPO_DIR"])
-GIT_REMOTE      = os.getenv("HEROKU_GIT_REMOTE", "heroku")
-
-CLAUDE_TIMEOUT  = int(os.getenv("CLAUDE_TIMEOUT", "300"))
-HEARTBEAT_KEY   = os.getenv("HEARTBEAT_KEY",   "claude:worker:heartbeat")
-HEARTBEAT_TTL   = 30    # seconds until key expires — if missing, worker is down
-HEARTBEAT_INTERVAL = 10  # how often to refresh
-API_BASE        = f"https://api.telegram.org/bot{BOT_TOKEN}"
-
-MAX_MSG         = 3800   # chars per Telegram message
-
-# Marker Claude must use when it needs clarification
-QUESTION_MARKER = "QUESTION:"
-
-# Instruction prepended to every prompt
-QUESTION_INSTRUCTION = (
-    "IMPORTANT SYSTEM RULE: You have full permissions to read and write all files — "
-    "never ask for file write permissions. "
-    "If you need clarification from the user before proceeding, output exactly: "
-    f"{QUESTION_MARKER} [your question] — and nothing else. "
-    "Otherwise, proceed with the task immediately.\n\n"
-)
-
-
-# ── Telegram ───────────────────────────────────────────────────────────────────
-async def tg_send(client: httpx.AsyncClient, chat_id: int, text: str,
-                  reply_to: int | None = None) -> dict:
-    p = {"chat_id": chat_id, "text": text[:4096], "parse_mode": "Markdown"}
-    if reply_to:
-        p["reply_to_message_id"] = reply_to
-    r = await client.post(f"{API_BASE}/sendMessage", json=p)
-    return r.json()
-
-
-async def tg_edit(client: httpx.AsyncClient, chat_id: int,
-                  msg_id: int, text: str) -> dict:
-    r = await client.post(f"{API_BASE}/editMessageText", json={
-        "chat_id": chat_id, "message_id": msg_id,
-        "text": text[:4096], "parse_mode": "Markdown",
-    })
-    return r.json()
-
-
-def chunks(text: str, size: int = MAX_MSG) -> list[str]:
-    parts = []
-    while len(text) > size:
-        cut = text.rfind("\n", 0, size) or size
-        parts.append(text[:cut])
-        text = text[cut:].lstrip("\n")
-    if text:
-        parts.append(text)
-    return parts or ["(нет вывода)"]
-
-
-# ── git helpers ────────────────────────────────────────────────────────────────
-def git(*args, cwd: Path = REPO_DIR) -> tuple[int, str, str]:
-    """Run a git command, return (returncode, stdout, stderr)."""
-    result = subprocess.run(
-        ["git", *args], cwd=str(cwd),
-        capture_output=True, text=True
-    )
-    return result.returncode, result.stdout.strip(), result.stderr.strip()
-
-
-def get_diff() -> str:
-    """Get git diff stat of the last commit (what Claude Code changed)."""
-    _, diff, _ = git("diff", "HEAD~1", "HEAD", "--stat")
-    return diff or "нет изменений"
-
-
-def get_commit_hash() -> str:
-    _, h, _ = git("rev-parse", "--short", "HEAD")
-    return h
-
-
-# ── Claude Code ────────────────────────────────────────────────────────────────
-def find_claude() -> str:
-    path = shutil.which("claude")
-    if path:
-        return path
-    for c in ["/usr/local/bin/claude",
-               str(Path.home() / ".npm-global/bin/claude"),
-               str(Path.home() / ".local/bin/claude")]:
-        if Path(c).exists():
-            return c
-    raise FileNotFoundError("Claude Code CLI not found. Install: npm install -g @anthropic-ai/claude-code")
-
-
-async def run_claude(prompt: str) -> tuple[bool, str]:
-    """Run claude --print in the repo directory."""
-    claude_bin = find_claude()
-    full_prompt = QUESTION_INSTRUCTION + prompt
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            claude_bin, "--print", "--dangerously-skip-permissions", "--output-format", "text", full_prompt,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=str(REPO_DIR),
-        )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=CLAUDE_TIMEOUT)
-        out = stdout.decode("utf-8", errors="replace").strip()
-        err = stderr.decode("utf-8", errors="replace").strip()
-
-        if proc.returncode == 0:
-            return True, out or "(пустой вывод)"
-        return False, out or err or f"Код выхода: {proc.returncode}"
-
-    except asyncio.TimeoutError:
-        try:
-            proc.kill()
-        except Exception:
-            pass
-        return False, f"⏰ Таймаут {CLAUDE_TIMEOUT}с — задача слишком долгая"
-    except Exception as e:
-        return False, f"❌ Ошибка запуска Claude Code: {e}"
-
-
-# ── Heroku deploy ──────────────────────────────────────────────────────────────
-async def heroku_deploy() -> tuple[bool, str]:
-    """git push heroku main, return (success, status message)."""
-    # 1. commit if there are changes
-    rc, status_out, _ = git("status", "--porcelain")
-    if status_out:
-        git("add", "-A")
-        rc, _, err = git("commit", "-m", f"feat: claude code task [{datetime.utcnow().strftime('%H:%M')}]")
-        if rc != 0:
-            return False, f"git commit failed: {err}"
-    else:
-        return True, "Нет изменений файлов — деплой не нужен"
-
-    # 2. push to origin (GitHub)
-    rc, out, err = git("push", "origin", "main")
-    if rc != 0:
-        return False, f"git push origin failed:\n{err}"
-
-    # 3. push to heroku
-    rc, out, err = git("push", GIT_REMOTE, "main")
-    if rc != 0:
-        rc, out, err = git("push", GIT_REMOTE, "master")
-    if rc != 0:
-        return False, f"git push heroku failed:\n{err}"
-
-    return True, "Push успешен, Heroku собирает..."
-
-
-# ── main loop ──────────────────────────────────────────────────────────────────
 async def process_task(redis_client: aioredis.Redis, task_raw: str) -> str:
     """
     Process a task. Returns:
-      "ok"       — completed successfully
-      "fail"     — failed, should be re-queued
-      "question" — Claude asked a question, task stored in waiting state
+      "ok"         — completed successfully
+      "fail"       — failed, should be re-queued
+      "question"   — Claude asked a question, task stored in waiting state
+      "rate_limit" — Claude rate limit hit, task stored in waiting state
     """
     task       = json.loads(task_raw)
     task_id    = task["task_id"]
@@ -230,6 +80,25 @@ async def process_task(redis_client: aioredis.Redis, task_raw: str) -> str:
 
         claude_ok, claude_out = await run_claude(prompt)
         elapsed = round((datetime.utcnow() - started).total_seconds(), 1)
+
+        # ── detect rate limit ─────────────────────────────────────────────────
+        if not claude_ok and is_rate_limited(claude_out):
+            log.warning("Task %s hit Claude rate limit — parking in waiting state", task_id)
+            if task_num:
+                await redis_client.set(
+                    f"{WAITING_PREFIX}{task_num}",
+                    json.dumps(task, ensure_ascii=False),
+                )
+            rl_msg = (
+                f"⏸ *Задача{num_str} — лимит Claude Code*\n\n"
+                f"`{claude_out}`\n\n"
+                f"Когда лимит сбросится, ответьте: `/answer_{task_num} продолжить`"
+            )
+            if ack_id:
+                await tg_edit(client, chat_id, ack_id, rl_msg)
+            else:
+                await tg_send(client, chat_id, rl_msg, reply_to=message_id)
+            return "rate_limit"
 
         # ── detect question from Claude ───────────────────────────────────────
         if claude_ok and claude_out.strip().upper().startswith(QUESTION_MARKER.upper()):
@@ -311,9 +180,6 @@ async def process_task(redis_client: aioredis.Redis, task_raw: str) -> str:
 
 
 async def heartbeat_writer(redis_client: aioredis.Redis) -> None:
-    """Writes a heartbeat key to Redis every HEARTBEAT_INTERVAL seconds.
-    If the key disappears (TTL expired), the manager bot knows the worker is down.
-    """
     while True:
         try:
             await redis_client.set(HEARTBEAT_KEY, datetime.utcnow().isoformat(), ex=HEARTBEAT_TTL)
@@ -339,7 +205,7 @@ async def recover_stale_task(redis_client: aioredis.Redis) -> None:
 
 
 async def main():
-    log.info("Worker started. Repo: %s", REPO_DIR)
+    log.info("Worker started.")
     redis_client = await aioredis.from_url(REDIS_URL, decode_responses=True)
     await recover_stale_task(redis_client)
     asyncio.create_task(heartbeat_writer(redis_client))
@@ -350,7 +216,6 @@ async def main():
                 continue
             _, raw = item
 
-            # Track in-progress task so /queue can show it
             await redis_client.set(PROGRESS_KEY, raw)
 
             result = "fail"
@@ -367,6 +232,7 @@ async def main():
                 task["retry"] = task.get("retry", 0) + 1
                 await redis_client.rpush(TASK_QUEUE, json.dumps(task, ensure_ascii=False))
                 log.info("Re-queued task %s as retry #%d", task["task_id"], task["retry"])
+            # "ok", "question", "rate_limit" — не перезапускаем
     finally:
         await redis_client.aclose()
 
