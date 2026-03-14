@@ -9,6 +9,7 @@ sequenceDiagram
     participant R as Redis
     participant W as Worker
     participant C as Claude Code
+    participant G as GitHub (origin)
     participant H as Heroku
 
     U->>B: пишешь задачу
@@ -31,6 +32,7 @@ sequenceDiagram
         B->>R: rpush claude:tasks (с ответом в промпте)
     else Задача выполнена
         C-->>W: результат
+        W->>G: git push origin main
         W->>H: git push heroku main
         W->>R: del claude:in_progress
         W->>U: ✅ Задача выполнена
