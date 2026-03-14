@@ -110,7 +110,7 @@ async def run_claude(prompt: str) -> tuple[bool, str]:
     claude_bin = find_claude()
     try:
         proc = await asyncio.create_subprocess_exec(
-            claude_bin, "--print", "--output-format", "text", prompt,
+            claude_bin, "--print", "--dangerously-skip-permissions", "--output-format", "text", prompt,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=str(REPO_DIR),
