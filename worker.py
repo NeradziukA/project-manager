@@ -1,10 +1,12 @@
 """
-worker.py — воркер:
-  1. Берёт задачу из Redis
-  2. git pull (обновляет репо)
-  3. Запускает Claude Code CLI с промптом
+worker.py:
+  1. Takes a task from Redis
+  2. git pull (updates repo)
+  3. Runs Claude Code CLI with prompt
   4. git add + commit + push heroku
-  5. Отправляет результат в Telegram
+  5. Sends result to Telegram
+
+Task result statuses: "ok" | "fail" | "question"
 """
 
 import os
@@ -25,12 +27,14 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("worker")
 
-# ── конфиг ────────────────────────────────────────────────────────────────────
+# ── config ─────────────────────────────────────────────────────────────────────
 BOT_TOKEN       = os.environ["TELEGRAM_BOT_TOKEN"]
-REDIS_URL       = os.getenv("REDIS_URL", "redis://localhost:6379")
-TASK_QUEUE      = os.getenv("TASK_QUEUE", "claude:tasks")
-RESULT_KEY      = os.getenv("RESULT_KEY", "claude:last_result")
-FAILED_QUEUE    = os.getenv("FAILED_QUEUE", "claude:failed")
+REDIS_URL       = os.getenv("REDIS_URL",       "redis://localhost:6379")
+TASK_QUEUE      = os.getenv("TASK_QUEUE",      "claude:tasks")
+RESULT_KEY      = os.getenv("RESULT_KEY",      "claude:last_result")
+FAILED_QUEUE    = os.getenv("FAILED_QUEUE",    "claude:failed")
+WAITING_PREFIX  = os.getenv("WAITING_PREFIX",  "claude:waiting:")
+PROGRESS_KEY    = os.getenv("PROGRESS_KEY",    "claude:in_progress")
 
 REPO_DIR        = Path(os.environ["REPO_DIR"])
 GIT_REMOTE      = os.getenv("HEROKU_GIT_REMOTE", "heroku")
@@ -38,10 +42,22 @@ GIT_REMOTE      = os.getenv("HEROKU_GIT_REMOTE", "heroku")
 CLAUDE_TIMEOUT  = int(os.getenv("CLAUDE_TIMEOUT", "300"))
 API_BASE        = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
-MAX_MSG         = 3800   # символов в сообщении Telegram
+MAX_MSG         = 3800   # chars per Telegram message
+
+# Marker Claude must use when it needs clarification
+QUESTION_MARKER = "QUESTION:"
+
+# Instruction prepended to every prompt
+QUESTION_INSTRUCTION = (
+    "IMPORTANT SYSTEM RULE: You have full permissions to read and write all files — "
+    "never ask for file write permissions. "
+    "If you need clarification from the user before proceeding, output exactly: "
+    f"{QUESTION_MARKER} [your question] — and nothing else. "
+    "Otherwise, proceed with the task immediately.\n\n"
+)
 
 
-# ── Telegram ──────────────────────────────────────────────────────────────────
+# ── Telegram ───────────────────────────────────────────────────────────────────
 async def tg_send(client: httpx.AsyncClient, chat_id: int, text: str,
                   reply_to: int | None = None) -> dict:
     p = {"chat_id": chat_id, "text": text[:4096], "parse_mode": "Markdown"}
@@ -71,9 +87,9 @@ def chunks(text: str, size: int = MAX_MSG) -> list[str]:
     return parts or ["(нет вывода)"]
 
 
-# ── git helpers ───────────────────────────────────────────────────────────────
+# ── git helpers ────────────────────────────────────────────────────────────────
 def git(*args, cwd: Path = REPO_DIR) -> tuple[int, str, str]:
-    """Запустить git команду, вернуть (returncode, stdout, stderr)."""
+    """Run a git command, return (returncode, stdout, stderr)."""
     result = subprocess.run(
         ["git", *args], cwd=str(cwd),
         capture_output=True, text=True
@@ -82,7 +98,7 @@ def git(*args, cwd: Path = REPO_DIR) -> tuple[int, str, str]:
 
 
 def get_diff() -> str:
-    """Получить git diff последнего коммита (что изменил Claude Code)."""
+    """Get git diff stat of the last commit (what Claude Code changed)."""
     _, diff, _ = git("diff", "HEAD~1", "HEAD", "--stat")
     return diff or "нет изменений"
 
@@ -92,7 +108,7 @@ def get_commit_hash() -> str:
     return h
 
 
-# ── Claude Code ───────────────────────────────────────────────────────────────
+# ── Claude Code ────────────────────────────────────────────────────────────────
 def find_claude() -> str:
     path = shutil.which("claude")
     if path:
@@ -102,15 +118,16 @@ def find_claude() -> str:
                str(Path.home() / ".local/bin/claude")]:
         if Path(c).exists():
             return c
-    raise FileNotFoundError("Claude Code CLI не найден. Установи: npm install -g @anthropic-ai/claude-code")
+    raise FileNotFoundError("Claude Code CLI not found. Install: npm install -g @anthropic-ai/claude-code")
 
 
 async def run_claude(prompt: str) -> tuple[bool, str]:
-    """Запустить claude --print в папке репозитория."""
+    """Run claude --print in the repo directory."""
     claude_bin = find_claude()
+    full_prompt = QUESTION_INSTRUCTION + prompt
     try:
         proc = await asyncio.create_subprocess_exec(
-            claude_bin, "--print", "--dangerously-skip-permissions", "--output-format", "text", prompt,
+            claude_bin, "--print", "--dangerously-skip-permissions", "--output-format", "text", full_prompt,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=str(REPO_DIR),
@@ -133,12 +150,10 @@ async def run_claude(prompt: str) -> tuple[bool, str]:
         return False, f"❌ Ошибка запуска Claude Code: {e}"
 
 
-# ── Heroku deploy ─────────────────────────────────────────────────────────────
+# ── Heroku deploy ──────────────────────────────────────────────────────────────
 async def heroku_deploy() -> tuple[bool, str]:
-    """
-    git push heroku main, вернуть (success, статус).
-    """
-    # 1. commit если есть изменения
+    """git push heroku main, return (success, status message)."""
+    # 1. commit if there are changes
     rc, status_out, _ = git("status", "--porcelain")
     if status_out:
         git("add", "-A")
@@ -148,11 +163,11 @@ async def heroku_deploy() -> tuple[bool, str]:
     else:
         return True, "Нет изменений файлов — деплой не нужен"
 
-    # 2. push на heroku
+    # 2. push to heroku
     branch = "main"
     rc, out, err = git("push", GIT_REMOTE, branch)
     if rc != 0:
-        # попробовать master
+        # try master
         rc, out, err = git("push", GIT_REMOTE, "master")
     if rc != 0:
         return False, f"git push failed:\n{err}"
@@ -160,45 +175,74 @@ async def heroku_deploy() -> tuple[bool, str]:
     return True, "Push успешен, Heroku собирает..."
 
 
-
-# ── основной цикл ─────────────────────────────────────────────────────────────
-async def process_task(redis_client: aioredis.Redis, task_raw: str) -> bool:
+# ── main loop ──────────────────────────────────────────────────────────────────
+async def process_task(redis_client: aioredis.Redis, task_raw: str) -> str:
+    """
+    Process a task. Returns:
+      "ok"       — completed successfully
+      "fail"     — failed, should be re-queued
+      "question" — Claude asked a question, task stored in waiting state
+    """
     task       = json.loads(task_raw)
     task_id    = task["task_id"]
+    task_num   = task.get("task_num")
     prompt     = task["prompt"]
     chat_id    = task["chat_id"]
     message_id = task.get("message_id")
     ack_id     = task.get("ack_msg_id")
     retry      = task.get("retry", 0)
 
-    log.info("Task %s (attempt #%d): %s", task_id, retry + 1, prompt[:80])
+    log.info("Task %s #%s (attempt #%d): %s", task_id, task_num, retry + 1, prompt[:80])
     started = datetime.utcnow()
 
     async with httpx.AsyncClient(timeout=30) as client:
 
-        # ── шаг 1: git pull ───────────────────────────────────────────────────
+        # ── step 1: git pull ──────────────────────────────────────────────────
         retry_str = f" (попытка #{retry + 1})" if retry > 0 else ""
+        num_str   = f" #{task_num}" if task_num else ""
         if ack_id:
             await tg_edit(client, chat_id, ack_id,
-                          f"🔄 *Шаг 1/3{retry_str}* — Обновляю репозиторий...")
+                          f"🔄 *Задача{num_str} — Шаг 1/3{retry_str}*\nОбновляю репозиторий...")
         rc, _, err = git("pull", "--rebase")
         if rc != 0:
             log.warning("git pull failed: %s", err)
 
-        # ── шаг 2: Claude Code ────────────────────────────────────────────────
+        # ── step 2: Claude Code ───────────────────────────────────────────────
         if ack_id:
             await tg_edit(client, chat_id, ack_id,
-                          "🤖 *Шаг 2/3* — Claude Code выполняет задачу...\n\nЭто может занять несколько минут.")
+                          f"🤖 *Задача{num_str} — Шаг 2/3*\nClaude Code выполняет задачу...\n\nЭто может занять несколько минут.")
 
         claude_ok, claude_out = await run_claude(prompt)
         elapsed = round((datetime.utcnow() - started).total_seconds(), 1)
 
-        # ── шаг 3: деплой на Heroku ───────────────────────────────────────────
+        # ── detect question from Claude ───────────────────────────────────────
+        if claude_ok and claude_out.strip().upper().startswith(QUESTION_MARKER.upper()):
+            question = claude_out.strip()[len(QUESTION_MARKER):].strip()
+            log.info("Task %s has a question: %s", task_id, question[:100])
+
+            if task_num:
+                await redis_client.set(
+                    f"{WAITING_PREFIX}{task_num}",
+                    json.dumps(task, ensure_ascii=False),
+                )
+
+            q_msg = (
+                f"❓ *Задача{num_str} — вопрос от Claude:*\n\n"
+                f"{question}\n\n"
+                f"Ответьте: `/answer_{task_num} ваш ответ`"
+            )
+            if ack_id:
+                await tg_edit(client, chat_id, ack_id, q_msg)
+            else:
+                await tg_send(client, chat_id, q_msg, reply_to=message_id)
+            return "question"
+
+        # ── step 3: deploy to Heroku ──────────────────────────────────────────
         deploy_status = "не выполнялся"
         if claude_ok:
             if ack_id:
                 await tg_edit(client, chat_id, ack_id,
-                              "🚀 *Шаг 3/3* — Деплой на Heroku...")
+                              f"🚀 *Задача{num_str} — Шаг 3/3*\nДеплой на Heroku...")
             push_ok, push_msg = await heroku_deploy()
             deploy_status = push_msg
         else:
@@ -213,12 +257,12 @@ async def process_task(redis_client: aioredis.Redis, task_raw: str) -> bool:
         except Exception:
             pass
 
-        # ── итоговое сообщение ────────────────────────────────────────────────
+        # ── result message ────────────────────────────────────────────────────
         icon = "✅" if claude_ok else "❌"
         attempt_label = f" • попытка #{retry + 1}" if retry > 0 else ""
         header = (
             f"{icon} *{'Задача выполнена' if claude_ok else 'Задача не выполнена — вернул в очередь'}"
-            f"* (⏱ {elapsed}с{attempt_label})\n\n"
+            f"{num_str}* (⏱ {elapsed}с{attempt_label})\n\n"
             f"🚀 *Деплой:* {deploy_status}"
             f"{diff}\n\n"
             f"📋 *Вывод Claude Code:*\n"
@@ -235,9 +279,10 @@ async def process_task(redis_client: aioredis.Redis, task_raw: str) -> bool:
         for part in parts[1:]:
             await tg_send(client, chat_id, part)
 
-    # ── сохранить для /status ─────────────────────────────────────────────────
+    # ── save for /status ──────────────────────────────────────────────────────
     await redis_client.set(RESULT_KEY, json.dumps({
         "task_id"       : task_id,
+        "task_num"      : task_num,
         "prompt"        : prompt,
         "success"       : claude_ok,
         "elapsed"       : elapsed,
@@ -246,7 +291,7 @@ async def process_task(redis_client: aioredis.Redis, task_raw: str) -> bool:
         "retry"         : retry,
     }, ensure_ascii=False))
 
-    return claude_ok
+    return "ok" if claude_ok else "fail"
 
 
 async def main():
@@ -258,13 +303,20 @@ async def main():
             if item is None:
                 continue
             _, raw = item
-            success = False
+
+            # Track in-progress task so /queue can show it
+            await redis_client.set(PROGRESS_KEY, raw)
+
+            result = "fail"
             try:
-                success = await process_task(redis_client, raw)
+                result = await process_task(redis_client, raw)
             except Exception as e:
                 log.exception("Task failed with exception: %s", e)
                 await redis_client.rpush(FAILED_QUEUE, raw)
-            if not success:
+            finally:
+                await redis_client.delete(PROGRESS_KEY)
+
+            if result == "fail":
                 task = json.loads(raw)
                 task["retry"] = task.get("retry", 0) + 1
                 await redis_client.rpush(TASK_QUEUE, json.dumps(task, ensure_ascii=False))
