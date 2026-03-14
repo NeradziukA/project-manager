@@ -162,23 +162,25 @@ async def heroku_deploy() -> tuple[bool, str]:
 
 
 # ── основной цикл ─────────────────────────────────────────────────────────────
-async def process_task(redis_client: aioredis.Redis, task_raw: str):
+async def process_task(redis_client: aioredis.Redis, task_raw: str) -> bool:
     task       = json.loads(task_raw)
     task_id    = task["task_id"]
     prompt     = task["prompt"]
     chat_id    = task["chat_id"]
     message_id = task.get("message_id")
     ack_id     = task.get("ack_msg_id")
+    retry      = task.get("retry", 0)
 
-    log.info("Task %s: %s", task_id, prompt[:80])
+    log.info("Task %s (attempt #%d): %s", task_id, retry + 1, prompt[:80])
     started = datetime.utcnow()
 
     async with httpx.AsyncClient(timeout=30) as client:
 
         # ── шаг 1: git pull ───────────────────────────────────────────────────
+        retry_str = f" (попытка #{retry + 1})" if retry > 0 else ""
         if ack_id:
             await tg_edit(client, chat_id, ack_id,
-                          "🔄 *Шаг 1/3* — Обновляю репозиторий...")
+                          f"🔄 *Шаг 1/3{retry_str}* — Обновляю репозиторий...")
         rc, _, err = git("pull", "--rebase")
         if rc != 0:
             log.warning("git pull failed: %s", err)
@@ -213,8 +215,10 @@ async def process_task(redis_client: aioredis.Redis, task_raw: str):
 
         # ── итоговое сообщение ────────────────────────────────────────────────
         icon = "✅" if claude_ok else "❌"
+        attempt_label = f" • попытка #{retry + 1}" if retry > 0 else ""
         header = (
-            f"{icon} *Задача выполнена* (⏱ {elapsed}с)\n\n"
+            f"{icon} *{'Задача выполнена' if claude_ok else 'Задача не выполнена — вернул в очередь'}"
+            f"* (⏱ {elapsed}с{attempt_label})\n\n"
             f"🚀 *Деплой:* {deploy_status}"
             f"{diff}\n\n"
             f"📋 *Вывод Claude Code:*\n"
@@ -239,7 +243,10 @@ async def process_task(redis_client: aioredis.Redis, task_raw: str):
         "elapsed"       : elapsed,
         "deploy_status" : deploy_status,
         "finished"      : datetime.utcnow().isoformat(),
+        "retry"         : retry,
     }, ensure_ascii=False))
+
+    return claude_ok
 
 
 async def main():
@@ -251,11 +258,17 @@ async def main():
             if item is None:
                 continue
             _, raw = item
+            success = False
             try:
-                await process_task(redis_client, raw)
+                success = await process_task(redis_client, raw)
             except Exception as e:
-                log.exception("Task failed: %s", e)
+                log.exception("Task failed with exception: %s", e)
                 await redis_client.rpush(FAILED_QUEUE, raw)
+            if not success:
+                task = json.loads(raw)
+                task["retry"] = task.get("retry", 0) + 1
+                await redis_client.rpush(TASK_QUEUE, json.dumps(task, ensure_ascii=False))
+                log.info("Re-queued task %s as retry #%d", task["task_id"], task["retry"])
     finally:
         await redis_client.aclose()
 
