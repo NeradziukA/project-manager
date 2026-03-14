@@ -166,14 +166,17 @@ async def heroku_deploy() -> tuple[bool, str]:
     else:
         return True, "Нет изменений файлов — деплой не нужен"
 
-    # 2. push to heroku
-    branch = "main"
-    rc, out, err = git("push", GIT_REMOTE, branch)
+    # 2. push to origin (GitHub)
+    rc, out, err = git("push", "origin", "main")
     if rc != 0:
-        # try master
+        return False, f"git push origin failed:\n{err}"
+
+    # 3. push to heroku
+    rc, out, err = git("push", GIT_REMOTE, "main")
+    if rc != 0:
         rc, out, err = git("push", GIT_REMOTE, "master")
     if rc != 0:
-        return False, f"git push failed:\n{err}"
+        return False, f"git push heroku failed:\n{err}"
 
     return True, "Push успешен, Heroku собирает..."
 
