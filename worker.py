@@ -197,9 +197,19 @@ async def process_task(redis_client: aioredis.Redis, task_raw: str) -> str:
 
     async with httpx.AsyncClient(timeout=30) as client:
 
-        # ── step 1: git pull ──────────────────────────────────────────────────
         retry_str = f" (попытка #{retry + 1})" if retry > 0 else ""
         num_str   = f" #{task_num}" if task_num else ""
+
+        # ── notify chat if no ack message yet ────────────────────────────────
+        if not ack_id:
+            r = await tg_send(
+                client, chat_id,
+                f"⚙️ *Задача{num_str} принята в работу{retry_str}*\n\n`{prompt[:200]}`",
+                reply_to=message_id,
+            )
+            ack_id = r.get("result", {}).get("message_id")
+
+        # ── step 1: git pull ──────────────────────────────────────────────────
         if ack_id:
             await tg_edit(client, chat_id, ack_id,
                           f"🔄 *Задача{num_str} — Шаг 1/3{retry_str}*\nОбновляю репозиторий...")
