@@ -204,7 +204,7 @@ async def process_task(redis_client: aioredis.Redis, task_raw: str) -> str:
         if not ack_id:
             r = await tg_send(
                 client, chat_id,
-                f"⚙️ *Задача{num_str} принята в работу{retry_str}*\n\n`{prompt[:200]}`",
+                f"⚙️ *Задача{num_str} принята в работу{retry_str}*\n\n`{prompt}`",
                 reply_to=message_id,
             )
             ack_id = r.get("result", {}).get("message_id")

@@ -114,7 +114,7 @@ async def webhook(request: Request):
         progress_raw = await redis.get(PROGRESS_KEY)
         if progress_raw:
             p = json.loads(progress_raw)
-            lines.append(f"⚙️ *В работе:* #{p.get('task_num', '?')} `{p['prompt'][:80]}`")
+            lines.append(f"⚙️ *В работе:* #{p.get('task_num', '?')} `{p['prompt'][:300]}`")
 
         # Active queue
         queue_items = await redis.lrange(TASK_QUEUE, 0, -1)
@@ -122,7 +122,7 @@ async def webhook(request: Request):
             lines.append(f"\n📋 *В очереди ({len(queue_items)}):*")
             for raw in queue_items:
                 t = json.loads(raw)
-                lines.append(f"  #{t.get('task_num', '?')} `{t['prompt'][:80]}`")
+                lines.append(f"  #{t.get('task_num', '?')} `{t['prompt'][:300]}`")
 
         # Pending confirmation
         pending_keys = [k async for k in redis.scan_iter(f"{PENDING_PREFIX}*")]
@@ -133,7 +133,7 @@ async def webhook(request: Request):
                 if raw:
                     t = json.loads(raw)
                     num = k.replace(PENDING_PREFIX, "")
-                    lines.append(f"  #{num} `{t['prompt'][:80]}`")
+                    lines.append(f"  #{num} `{t['prompt'][:300]}`")
 
         # Waiting for answer
         waiting_keys = [k async for k in redis.scan_iter(f"{WAITING_PREFIX}*")]
@@ -144,7 +144,7 @@ async def webhook(request: Request):
                 if raw:
                     t = json.loads(raw)
                     num = k.replace(WAITING_PREFIX, "")
-                    lines.append(f"  #{num} `{t['prompt'][:80]}`")
+                    lines.append(f"  #{num} `{t['prompt'][:300]}`")
 
         if not lines:
             await send(chat_id, "📋 Очередь пуста")
