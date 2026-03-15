@@ -100,9 +100,17 @@ async def process_task(redis_client: aioredis.Redis, task_raw: str) -> str:
                 await tg_send(client, chat_id, rl_msg, reply_to=message_id)
             return "rate_limit"
 
-        # ── detect question from Claude ───────────────────────────────────────
-        if claude_ok and claude_out.strip().upper().startswith(QUESTION_MARKER.upper()):
-            question = claude_out.strip()[len(QUESTION_MARKER):].strip()
+        # ── detect question from Claude (marker at start OR end of output) ──────
+        out_stripped = claude_out.strip()
+        last_line = out_stripped.splitlines()[-1].strip() if out_stripped else ""
+        has_question_marker = (
+            out_stripped.upper().startswith(QUESTION_MARKER.upper()) or
+            last_line.upper().startswith(QUESTION_MARKER.upper())
+        )
+        if claude_ok and has_question_marker:
+            # extract from whichever line has the marker
+            marker_line = last_line if last_line.upper().startswith(QUESTION_MARKER.upper()) else out_stripped
+            question = marker_line[len(QUESTION_MARKER):].strip()
             log.info("Task %s has a question: %s", task_id, question[:100])
 
             if task_num:

@@ -24,8 +24,8 @@ sequenceDiagram
     W->>U: ⚙️ Задача #N принята в работу
     W->>W: git pull
     W->>C: claude --print --dangerously-skip-permissions
-    alt Claude задаёт вопрос
-        C-->>W: QUESTION: ...
+    alt Claude задаёт вопрос (QUESTION: в начале или конце вывода)
+        C-->>W: QUESTION: ... (первая или последняя строка)
         W->>R: set claude:waiting:{N}
         W->>U: ❓ Задача #N — вопрос: ... /answer_N
         U->>B: /answer_N ответ

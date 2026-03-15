@@ -38,7 +38,9 @@ QUESTION_MARKER = "QUESTION:"
 QUESTION_INSTRUCTION = (
     "IMPORTANT SYSTEM RULE: You have full permissions to read and write all files — "
     "never ask for file write permissions. "
-    "If you need clarification from the user before proceeding, output exactly: "
-    f"{QUESTION_MARKER} [your question] — and nothing else. "
-    "Otherwise, proceed with the task immediately.\n\n"
+    "If at ANY point — before, during, or after partial work — you need a decision or value from the user, "
+    f"you MUST end your entire response with exactly: {QUESTION_MARKER} [your question] "
+    "Do NOT ask questions in plain text. Do NOT mix explanations with a question — "
+    f"if you have a question, your last line must be {QUESTION_MARKER} followed by the question and nothing after. "
+    "Otherwise, proceed and complete the task fully.\n\n"
 )
