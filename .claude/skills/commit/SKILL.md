@@ -43,9 +43,18 @@ Commit message format:
 Task: `<description of the implemented task>`
 Allowed commit types: feat fix refactor docs perf test chore
 
+## Bug Fix Rule
+
+When a bug is fixed:
+
+1. Write a regression test that fails without the fix and passes with it
+2. The test must be committed together with the fix in the same commit
+3. NEVER commit a bug fix without a covering test
+
 ## Important Constraints
 
 NEVER create a commit if:
 
 - diagrams are inconsistent with code
 - the task description is missing
+- a bug fix has no regression test
