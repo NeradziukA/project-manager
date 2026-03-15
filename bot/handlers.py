@@ -14,7 +14,7 @@ from fastapi.responses import JSONResponse
 
 from shared.config import (
     ALLOWED_IDS, TASK_QUEUE, RESULT_KEY, TASK_COUNTER,
-    PENDING_PREFIX, WAITING_PREFIX, PROGRESS_KEY,
+    PENDING_PREFIX, WAITING_PREFIX, PROGRESS_KEY, PM2_APP_NAME,
 )
 from bot.telegram import tg, send, edit, confirm_keyboard
 
@@ -87,10 +87,11 @@ async def handle_message(redis, message: dict) -> JSONResponse:
     # /start, /help ───────────────────────────────────────────────────────────
     if text in ("/start", "/help"):
         await send(chat_id, (
-            "👋 *Claude Code + Heroku Bot*\n\n"
+            "👋 *Claude Code Bot*\n\n"
             "Напиши задачу — появятся кнопки подтверждения, затем Claude Code изменит код и задеплоит.\n\n"
             "*/queue* — очередь задач\n"
             "*/status* — статус последней задачи\n"
+            "*/restart_hives* — перезапустить сервер через pm2\n"
             "*/update_bot* — обновить и перезапустить бот\n\n"
             "После отправки задачи:\n"
             "  `/answer_N текст` — ответить на вопрос по задаче N"
@@ -152,6 +153,20 @@ async def handle_message(redis, message: dict) -> JSONResponse:
             ))
         else:
             await send(chat_id, "Задач ещё не было.")
+        return JSONResponse({"ok": True})
+
+    # /restart_hives ───────────────────────────────────────────────────────────
+    if text == "/restart_hives":
+        await send(chat_id, f"🔄 Перезапускаю `{PM2_APP_NAME}` через pm2...")
+        r = subprocess.run(
+            ["npx", "pm2", "restart", PM2_APP_NAME],
+            cwd=str(PROJECT_DIR.parent / "hives" / "server"),
+            capture_output=True, text=True,
+        )
+        if r.returncode == 0:
+            await send(chat_id, f"✅ `pm2 restart {PM2_APP_NAME}` выполнен")
+        else:
+            await send(chat_id, f"❌ Ошибка:\n```\n{r.stderr.strip()[:600]}\n```")
         return JSONResponse({"ok": True})
 
     # /update_bot ──────────────────────────────────────────────────────────────

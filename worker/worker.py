@@ -3,7 +3,7 @@ worker/worker.py:
   1. Takes a task from Redis
   2. git pull (updates repo)
   3. Runs Claude Code CLI with prompt
-  4. git add + commit + push heroku
+  4. git add + commit + push origin + build + pm2 restart
   5. Sends result to Telegram
 
 Task result statuses: "ok" | "fail" | "question" | "rate_limit"
@@ -24,7 +24,7 @@ from shared.config import (
     QUESTION_MARKER,
 )
 from worker.telegram import tg_send, tg_edit, chunks
-from worker.git_utils import git, get_diff, heroku_deploy
+from worker.git_utils import git, get_diff, vds_deploy
 from worker.claude_runner import run_claude, is_rate_limited
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -122,13 +122,13 @@ async def process_task(redis_client: aioredis.Redis, task_raw: str) -> str:
                 await tg_send(client, chat_id, q_msg, reply_to=message_id)
             return "question"
 
-        # ── step 3: deploy to Heroku ──────────────────────────────────────────
+        # ── step 3: build + pm2 restart ───────────────────────────────────────
         deploy_status = "не выполнялся"
         if claude_ok:
             if ack_id:
                 await tg_edit(client, chat_id, ack_id,
-                              f"🚀 *Задача{num_str} — Шаг 3/3*\nДеплой на Heroku...")
-            push_ok, push_msg = await heroku_deploy()
+                              f"🚀 *Задача{num_str} — Шаг 3/3*\nСборка и перезапуск сервера...")
+            push_ok, push_msg = await vds_deploy()
             deploy_status = push_msg
         else:
             deploy_status = "⏭ Пропущен (Claude Code завершился с ошибкой)"

@@ -22,7 +22,7 @@ NOTIFY_CHAT_ID  = int(os.getenv("NOTIFY_CHAT_ID", "0")) or next(iter(ALLOWED_IDS
 CHECK_INTERVAL  = int(os.getenv("WORKER_CHECK_INTERVAL", "300"))
 
 REPO_DIR        = Path(os.environ["REPO_DIR"])
-GIT_REMOTE      = os.getenv("HEROKU_GIT_REMOTE", "heroku")
+PM2_APP_NAME    = os.getenv("PM2_APP_NAME", "hives")
 
 CLAUDE_TIMEOUT     = int(os.getenv("CLAUDE_TIMEOUT", "300"))
 HEARTBEAT_KEY      = os.getenv("HEARTBEAT_KEY",   "claude:worker:heartbeat")

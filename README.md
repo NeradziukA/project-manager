@@ -1,4 +1,4 @@
-# Telegram → Claude Code → Heroku
+# Telegram → Claude Code → VDS (pm2)
 
 ## Как работает
 
@@ -10,7 +10,7 @@ sequenceDiagram
     participant W as Worker
     participant C as Claude Code
     participant G as GitHub (origin)
-    participant H as Heroku
+    participant V as VDS (pm2)
 
     U->>B: пишешь задачу
     B->>R: claude:pending:{N} + номер задачи
@@ -33,7 +33,8 @@ sequenceDiagram
     else Задача выполнена
         C-->>W: результат
         W->>G: git push origin main
-        W->>H: git push heroku main
+        W->>V: npm run build (client + server)
+        W->>V: npx pm2 restart hives
         W->>R: del claude:in_progress
         W->>U: ✅ Задача выполнена
     end
@@ -126,10 +127,8 @@ python setup_webhook.py
 | `WEBHOOK_URL` | https://твой-домен/webhook |
 | `REDIS_URL` | redis://localhost:6379 |
 | `REPO_DIR` | Путь к папке с проектом, напр. /opt/myproject |
-| `HEROKU_APP_NAME` | Название приложения на Heroku |
-| `HEROKU_API_KEY` | API ключ с dashboard.heroku.com/account |
+| `PM2_APP_NAME` | Имя процесса pm2 (по умолч. `hives`) |
 | `CLAUDE_TIMEOUT` | Таймаут для Claude Code (сек, по умолч. 300) |
-| `DEPLOY_TIMEOUT` | Таймаут ожидания деплоя (сек, по умолч. 180) |
 
 ---
 
@@ -141,6 +140,7 @@ python setup_webhook.py
 - `/answer_N текст` — ответить на вопрос Claude по задаче #N
 - `/queue` — очередь: ожидающие, задача в работе, статистика
 - `/status` — результат последней задачи
+- `/restart_hives` — перезапустить сервер hives через pm2 (без сборки)
 
 ---
 
