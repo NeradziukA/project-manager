@@ -271,8 +271,23 @@ async def main():
             if result == "fail":
                 task = json.loads(raw)
                 task["retry"] = task.get("retry", 0) + 1
-                await redis_client.rpush(TASK_QUEUE, json.dumps(task, ensure_ascii=False))
-                log.info("Re-queued task %s as retry #%d", task["task_id"], task["retry"])
+                if task["retry"] >= 3:
+                    log.warning("Task %s exceeded max retries — moving to failed queue", task["task_id"])
+                    await redis_client.rpush(FAILED_QUEUE, json.dumps(task, ensure_ascii=False))
+                    chat_id = task.get("chat_id")
+                    task_num = task.get("task_num")
+                    ack_id = task.get("ack_msg_id")
+                    if chat_id:
+                        num_str = f" #{task_num}" if task_num else ""
+                        msg = f"🚫 *Задача{num_str} — превышен лимит попыток*\n\nЗадача выполнялась 3 раза и каждый раз завершалась ошибкой. Перемещена в очередь ошибок."
+                        async with httpx.AsyncClient(timeout=15) as client:
+                            if ack_id:
+                                await tg_edit(client, chat_id, ack_id, msg)
+                            else:
+                                await tg_send(client, chat_id, msg)
+                else:
+                    await redis_client.rpush(TASK_QUEUE, json.dumps(task, ensure_ascii=False))
+                    log.info("Re-queued task %s as retry #%d", task["task_id"], task["retry"])
             # "ok", "question", "rate_limit" — не перезапускаем
     finally:
         await redis_client.aclose()
