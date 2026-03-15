@@ -50,7 +50,12 @@ async def run_claude(prompt: str) -> tuple[bool, str]:
 
         if proc.returncode == 0:
             return True, out or "(пустой вывод)"
-        return False, out or err or f"Код выхода: {proc.returncode}"
+        parts = [f"Код выхода: {proc.returncode}"]
+        if out:
+            parts.append(f"stdout:\n{out}")
+        if err:
+            parts.append(f"stderr:\n{err}")
+        return False, "\n\n".join(parts)
 
     except asyncio.TimeoutError:
         try:

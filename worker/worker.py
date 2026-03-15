@@ -145,9 +145,15 @@ async def process_task(redis_client: aioredis.Redis, task_raw: str) -> str:
         # ── result message ────────────────────────────────────────────────────
         icon = "✅" if claude_ok else "❌"
         attempt_label = f" • попытка #{retry + 1}" if retry > 0 else ""
+        if not claude_ok:
+            error_preview = claude_out.strip()[:300]
+            fail_reason = f"\n\n⚠️ *Причина:* `{error_preview}`"
+        else:
+            fail_reason = ""
         header = (
             f"{icon} *{'Задача выполнена' if claude_ok else 'Задача не выполнена — вернул в очередь'}"
-            f"{num_str}* (⏱ {elapsed}с{attempt_label})\n\n"
+            f"{num_str}* (⏱ {elapsed}с{attempt_label})"
+            f"{fail_reason}\n\n"
             f"🚀 *Деплой:* {deploy_status}"
             f"{diff}\n\n"
             f"📋 *Вывод Claude Code:*\n"
@@ -200,6 +206,22 @@ async def recover_stale_task(redis_client: aioredis.Redis) -> None:
         await redis_client.delete(PROGRESS_KEY)
         log.info("Recovered stale task #%s → requeued as retry #%d",
                  task.get("task_num"), task["retry"])
+        # Notify about the crash recovery
+        chat_id = task.get("chat_id")
+        task_num = task.get("task_num")
+        ack_id = task.get("ack_msg_id")
+        if chat_id:
+            num_str = f" #{task_num}" if task_num else ""
+            msg = (
+                f"⚠️ *Задача{num_str} — воркер был перезапущен*\n\n"
+                f"Задача была прервана и поставлена в очередь повторно "
+                f"(попытка #{task['retry'] + 1})."
+            )
+            async with httpx.AsyncClient(timeout=15) as client:
+                if ack_id:
+                    await tg_edit(client, chat_id, ack_id, msg)
+                else:
+                    await tg_send(client, chat_id, msg)
     except Exception as e:
         log.warning("Failed to recover stale task: %s", e)
 
@@ -224,6 +246,25 @@ async def main():
             except Exception as e:
                 log.exception("Task failed with exception: %s", e)
                 await redis_client.rpush(FAILED_QUEUE, raw)
+                try:
+                    task = json.loads(raw)
+                    chat_id = task.get("chat_id")
+                    task_num = task.get("task_num")
+                    ack_id = task.get("ack_msg_id")
+                    if chat_id:
+                        num_str = f" #{task_num}" if task_num else ""
+                        msg = (
+                            f"💥 *Задача{num_str} — необработанная ошибка*\n\n"
+                            f"`{type(e).__name__}: {str(e)[:300]}`\n\n"
+                            f"Задача перемещена в очередь ошибок."
+                        )
+                        async with httpx.AsyncClient(timeout=15) as client:
+                            if ack_id:
+                                await tg_edit(client, chat_id, ack_id, msg)
+                            else:
+                                await tg_send(client, chat_id, msg)
+                except Exception:
+                    pass
             finally:
                 await redis_client.delete(PROGRESS_KEY)
 
