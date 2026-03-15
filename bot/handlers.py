@@ -232,8 +232,14 @@ async def handle_message(redis, message: dict) -> JSONResponse:
                            reply_markup={"inline_keyboard": []})
             await send(chat_id, f"🚫 Задача *#{num}* отменена.")
             log.info("Task #%s cancelled via command", num)
+            return JSONResponse({"ok": True})
+        raw = await redis.get(f"{WAITING_PREFIX}{num}")
+        if raw:
+            await redis.delete(f"{WAITING_PREFIX}{num}")
+            await send(chat_id, f"🚫 Задача *#{num}* отменена (была в ожидании ответа).")
+            log.info("Task #%s (waiting) cancelled via command", num)
         else:
-            await send(chat_id, f"❓ Задача *#{num}* не найдена среди ожидающих.")
+            await send(chat_id, f"❓ Задача *#{num}* не найдена.")
         return JSONResponse({"ok": True})
 
     # /answer_N text ───────────────────────────────────────────────────────────
